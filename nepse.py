@@ -2,7 +2,9 @@ import sys
 import json
 import logging
 import requests
+import locale
 from time import sleep
+from tabulate import tabulate, tabulate_formats
 from datetime import datetime
 from typing import Tuple, Union
 from urllib.parse import urljoin
@@ -12,6 +14,8 @@ from requests.adapters import HTTPAdapter
 logging.basicConfig(
     stream=sys.stdout, level=logging.INFO, format="%(levelname)s: %(message)s"
 )
+
+locale.setlocale(locale.LC_ALL, "en_IN")
 
 
 class TimeoutHTTPAdapter(HTTPAdapter):
@@ -39,6 +43,7 @@ class NEPSE:
     def __init__(self) -> None:
         self._create_session()
         self._get_all_securities()
+        self._get_sectors()
 
     def _create_session(self) -> None:
         self._session = requests.Session()
@@ -106,17 +111,18 @@ class NEPSE:
         )
 
         if not error:
-            self._sub_indices = {sector["id"]: sector for sector in response.json()}
+            self._sub_indices = {
+                sector["id"]: sector["index"] for sector in response.json()
+            }
         else:
             logging.error(error)
 
     @staticmethod
     def _get_sorted_dict(items: dict, top_n: int) -> dict:
-        return {
-            k: items[k]
-            for i, k in enumerate(sorted(items, key=items.get, reverse=True))
-            if i <= top_n
-        }
+        sorted_items = sorted(
+            items.items(), key=lambda x: x[1]["quantity"], reverse=True
+        )
+        return sorted_items[:top_n]
 
     def _get_floorsheet(
         self, symbol: str, date: Union[str, None] = None, top_n: int = 5
@@ -136,7 +142,7 @@ class NEPSE:
                 "page": page_number,
             }
 
-            payload = {"id": 232}
+            payload = {"id": 791}
             headers = {
                 **self._get_common_headers(),
                 "content-type": "application/json",
@@ -148,32 +154,78 @@ class NEPSE:
                 "POST", url, headers=headers, params=params, data=json.dumps(payload)
             )
             if not error:
-                floorsheet = response.json()["floorsheets"]
+                response_json = response.json()
+                total_quantity = response_json["totalQty"]
+                floorsheet = response_json["floorsheets"]
                 last_page = floorsheet["last"]
                 if not floorsheet["empty"]:
                     floorsheet_data.extend(floorsheet["content"])
             else:
                 logging.error(error)
             page_number += 1
-        top_buy = {}
-        top_sell = {}
-        for data in floorsheet_data:
-            buyer_id = ("%s - %s") % (data["buyerMemberId"], data["buyerBrokerName"])
-            seller_id = ("%s - %s") % (data["sellerMemberId"], data["sellerBrokerName"])
-            if top_buy.get(buyer_id) != None:
-                top_buy[buyer_id] += data["contractQuantity"]
-            else:
-                top_buy[buyer_id] = 0
-                top_buy[buyer_id] += data["contractQuantity"]
+        top_buy, top_sell = {}, {}
+        if len(floorsheet_data) > 0:
+            for data in floorsheet_data:
+                buyer_id = ("%s - %s") % (
+                    data["buyerMemberId"],
+                    data["buyerBrokerName"],
+                )
+                seller_id = ("%s - %s") % (
+                    data["sellerMemberId"],
+                    data["sellerBrokerName"],
+                )
+                if top_buy.get(buyer_id) != None:
+                    top_buy[buyer_id]["quantity"] += data["contractQuantity"]
+                else:
+                    top_buy[buyer_id] = {"quantity": 0}
+                    top_buy[buyer_id]["quantity"] += data["contractQuantity"]
+                if top_sell.get(seller_id) != None:
+                    top_sell[seller_id]["quantity"] += data["contractQuantity"]
+                else:
+                    top_sell[seller_id] = {"quantity": 0}
+                    top_sell[seller_id]["quantity"] += data["contractQuantity"]
 
-            if top_sell.get(seller_id) != None:
-                top_sell[seller_id] += data["contractQuantity"]
-            else:
-                top_sell[seller_id] = 0
-                top_sell[seller_id] += data["contractQuantity"]
-        top_buy = self._get_sorted_dict(top_buy, top_n)
-        top_sell = self._get_sorted_dict(top_sell, top_n)
+            for k, v in top_buy.items():
+                top_buy[k]["percent"] = round(v["quantity"] * 100 / total_quantity, 2)
+            for k, v in top_sell.items():
+                top_sell[k]["percent"] = round(v["quantity"] * 100 / total_quantity, 2)
+            top_buy = self._get_sorted_dict(top_buy, top_n)
+            top_sell = self._get_sorted_dict(top_sell, top_n)
         return top_buy, top_sell
+
+    @staticmethod
+    def _display_data(symbol: str, top_buy: list, top_sell: list):
+        top_buy_data = [
+            ["Broker (Top Buy)", "Quantity", "Percent"],
+        ]
+        top_sell_data = [
+            ["Broker (Top Sell)", "Quantity", "Percent"],
+        ]
+        for item in top_buy:
+            top_buy_data.append(
+                [
+                    item[0],
+                    locale.format_string("%d", item[1]["quantity"], grouping=True),
+                    item[1]["percent"],
+                ]
+            )
+        for item in top_sell:
+            top_sell_data.append(
+                [
+                    item[0],
+                    locale.format_string("%d", item[1]["quantity"], grouping=True),
+                    item[1]["percent"],
+                ]
+            )
+        print(tabulate([symbol], tablefmt="grid"), end="\n")
+        print(
+            tabulate(top_buy_data, headers="firstrow", tablefmt="fancy_grid"),
+            end="\n",
+        )
+        print(
+            tabulate(top_sell_data, headers="firstrow", tablefmt="fancy_grid"),
+            end="\n\n",
+        )
 
     def _get_sector_floorsheet(
         self, sector_id: int, date: Union[str, None] = None, top_n: int = 5
@@ -197,6 +249,19 @@ class NEPSE:
                     "top_buy": top_buy,
                     "top_sell": top_sell,
                 }
-            print(json.dumps(sector_floorsheet, indent=4))
         else:
             logging.error(error)
+        return sector_floorsheet
+
+    def display_floorsheet(self, symbol: str, date: Union[str, None] = None):
+        top_buy, top_sell = self._get_floorsheet(symbol, date)
+        self._display_data(symbol, top_buy, top_sell)
+
+    def display_sector_floorsheet(
+        self, sector_id: int, date: Union[str, None] = None, top_n: int = 5
+    ):
+        sector_floorsheet = self._get_sector_floorsheet(sector_id, date, top_n)
+        for symbol, floorsheet in sector_floorsheet.items():
+            top_buy = floorsheet["top_buy"]
+            top_sell = floorsheet["top_sell"]
+            self._display_data(symbol, top_buy, top_sell)
