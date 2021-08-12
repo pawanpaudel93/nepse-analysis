@@ -2,6 +2,7 @@ import sys
 import json
 import logging
 import requests
+from time import sleep
 from datetime import datetime
 from typing import Tuple, Union
 from urllib.parse import urljoin
@@ -33,6 +34,7 @@ class TimeoutHTTPAdapter(HTTPAdapter):
 class NEPSE:
     _base_url = "https://newweb.nepalstock.com"
     _securities = {}
+    _sectors = {}
 
     def __init__(self) -> None:
         self._create_session()
@@ -66,6 +68,7 @@ class NEPSE:
         self, *args, **kwargs
     ) -> Tuple[Union[requests.Response, None], Union[str, None]]:
         try:
+            sleep(0.5)
             response = self._session.request(*args, **kwargs)
             response.raise_for_status()
         except BaseException as error:
@@ -89,21 +92,51 @@ class NEPSE:
         else:
             logging.error(error)
 
-    def _get_floorsheet(self, symbol):
+    def _get_sectors(self):
+        url = self._create_url("/api/nots")
+
+        payload = {}
+        headers = {
+            **self._get_common_headers(),
+            "referer": "https://newweb.nepalstock.com/",
+        }
+
+        response, error = self._perform_request(
+            "GET", url, headers=headers, data=payload
+        )
+
+        if not error:
+            self._sub_indices = {sector["id"]: sector for sector in response.json()}
+        else:
+            logging.error(error)
+
+    @staticmethod
+    def _get_sorted_dict(items: dict, top_n: int) -> dict:
+        return {
+            k: items[k]
+            for i, k in enumerate(sorted(items, key=items.get, reverse=True))
+            if i <= top_n
+        }
+
+    def _get_floorsheet(
+        self, symbol: str, date: Union[str, None] = None, top_n: int = 5
+    ):
         page_number = 0
         last_page = False
         floorsheet_data = []
         _id = self._securities[symbol]["id"]
+        if not date:
+            date = datetime.today().strftime("%Y-%m-%d")
         url = self._create_url(f"/api/nots/security/floorsheet/{_id}")
         while not last_page:
             params = {
                 "size": 2000,
-                "businessDate": datetime.today().strftime("%Y-%m-%d"),
+                "businessDate": date,
                 "sort": "contractId,asc",
                 "page": page_number,
             }
 
-            payload = {"id": 868}
+            payload = {"id": 232}
             headers = {
                 **self._get_common_headers(),
                 "content-type": "application/json",
@@ -122,23 +155,48 @@ class NEPSE:
             else:
                 logging.error(error)
             page_number += 1
-        floorsheet_analyis = {}
+        top_buy = {}
+        top_sell = {}
         for data in floorsheet_data:
-            buyer_id = data["buyerMemberId"]
-            seller_id = data["sellerMemberId"]
-            if floorsheet_analyis.get(buyer_id):
-                floorsheet_analyis[buyer_id]["buy"] += data["contractQuantity"]
+            buyer_id = ("%s - %s") % (data["buyerMemberId"], data["buyerBrokerName"])
+            seller_id = ("%s - %s") % (data["sellerMemberId"], data["sellerBrokerName"])
+            if top_buy.get(buyer_id) != None:
+                top_buy[buyer_id] += data["contractQuantity"]
             else:
-                floorsheet_analyis[buyer_id] = {
-                    "buy": 0,
-                    "sell": 0,
-                }
+                top_buy[buyer_id] = 0
+                top_buy[buyer_id] += data["contractQuantity"]
 
-            if floorsheet_analyis.get(seller_id):
-                floorsheet_analyis[seller_id]["sell"] += data["contractQuantity"]
+            if top_sell.get(seller_id) != None:
+                top_sell[seller_id] += data["contractQuantity"]
             else:
-                floorsheet_analyis[seller_id] = {
-                    "buy": 0,
-                    "sell": 0,
+                top_sell[seller_id] = 0
+                top_sell[seller_id] += data["contractQuantity"]
+        top_buy = self._get_sorted_dict(top_buy, top_n)
+        top_sell = self._get_sorted_dict(top_sell, top_n)
+        return top_buy, top_sell
+
+    def _get_sector_floorsheet(
+        self, sector_id: int, date: Union[str, None] = None, top_n: int = 5
+    ):
+        url = self._create_url("/api/nots/securityDailyTradeStat/%s" % sector_id)
+        headers = {
+            **self._get_common_headers(),
+            "referer": self._base_url,
+        }
+        response, error = self._perform_request("GET", url, headers=headers, data={})
+        sector_floorsheet = {}
+        if not error:
+            securities = response.json()
+            for security in securities:
+                if not date:
+                    date = datetime.today().strftime("%Y-%m-%d")
+                top_buy, top_sell = self._get_floorsheet(
+                    security["symbol"], date=date, top_n=top_n
+                )
+                sector_floorsheet[security["symbol"]] = {
+                    "top_buy": top_buy,
+                    "top_sell": top_sell,
                 }
-        print(floorsheet_analyis)
+            print(json.dumps(sector_floorsheet, indent=4))
+        else:
+            logging.error(error)
