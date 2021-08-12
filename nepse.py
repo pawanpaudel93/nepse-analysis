@@ -37,8 +37,8 @@ class TimeoutHTTPAdapter(HTTPAdapter):
 
 class NEPSE:
     _base_url = "https://newweb.nepalstock.com"
-    _securities = {}
-    _sectors = {}
+    securities = {}
+    sectors = {}
 
     def __init__(self) -> None:
         self._create_session()
@@ -91,7 +91,7 @@ class NEPSE:
 
         response, error = self._perform_request("GET", url, headers=headers, data={})
         if not error:
-            self._securities = {
+            self.securities = {
                 security["symbol"]: security for security in response.json()
             }
         else:
@@ -111,9 +111,7 @@ class NEPSE:
         )
 
         if not error:
-            self._sub_indices = {
-                sector["id"]: sector["index"] for sector in response.json()
-            }
+            self.sectors = {sector["id"]: sector["index"] for sector in response.json()}
         else:
             logging.error(error)
 
@@ -130,7 +128,7 @@ class NEPSE:
         page_number = 0
         last_page = False
         floorsheet_data = []
-        _id = self._securities[symbol]["id"]
+        _id = self.securities[symbol]["id"]
         if not date:
             date = datetime.today().strftime("%Y-%m-%d")
         url = self._create_url(f"/api/nots/security/floorsheet/{_id}")
@@ -195,35 +193,34 @@ class NEPSE:
 
     @staticmethod
     def _display_data(symbol: str, top_buy: list, top_sell: list):
-        top_buy_data = [
-            ["Broker (Top Buy)", "Quantity", "Percent"],
+        data = [
+            [
+                "Top Buyer",
+                "Quantity",
+                "Percent",
+                "↕",
+                "Top Seller",
+                "Quantity",
+                "Percent",
+            ],
         ]
-        top_sell_data = [
-            ["Broker (Top Sell)", "Quantity", "Percent"],
-        ]
-        for item in top_buy:
-            top_buy_data.append(
+        for index in range(0, 5):
+            buy_item = top_buy[index]
+            sell_item = top_sell[index]
+            data.append(
                 [
-                    item[0],
-                    locale.format_string("%d", item[1]["quantity"], grouping=True),
-                    item[1]["percent"],
-                ]
-            )
-        for item in top_sell:
-            top_sell_data.append(
-                [
-                    item[0],
-                    locale.format_string("%d", item[1]["quantity"], grouping=True),
-                    item[1]["percent"],
+                    buy_item[0],
+                    locale.format_string("%d", buy_item[1]["quantity"], grouping=True),
+                    buy_item[1]["percent"],
+                    "↕",
+                    sell_item[0],
+                    locale.format_string("%d", sell_item[1]["quantity"], grouping=True),
+                    sell_item[1]["percent"],
                 ]
             )
         print(tabulate([symbol], tablefmt="grid"), end="\n")
         print(
-            tabulate(top_buy_data, headers="firstrow", tablefmt="fancy_grid"),
-            end="\n",
-        )
-        print(
-            tabulate(top_sell_data, headers="firstrow", tablefmt="fancy_grid"),
+            tabulate(data, headers="firstrow", tablefmt="fancy_grid"),
             end="\n\n",
         )
 
