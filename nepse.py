@@ -4,7 +4,7 @@ import logging
 import requests
 import locale
 from time import sleep
-from tabulate import tabulate, tabulate_formats
+from tabulate import tabulate
 from datetime import datetime
 from typing import Tuple, Union
 from urllib.parse import urljoin
@@ -37,7 +37,7 @@ class TimeoutHTTPAdapter(HTTPAdapter):
 
 class NEPSE:
     _base_url = "https://newweb.nepalstock.com"
-    securities = {}
+    _securities = {}
     sectors = {}
 
     def __init__(self) -> None:
@@ -91,7 +91,7 @@ class NEPSE:
 
         response, error = self._perform_request("GET", url, headers=headers, data={})
         if not error:
-            self.securities = {
+            self._securities = {
                 security["symbol"]: security for security in response.json()
             }
         else:
@@ -111,26 +111,76 @@ class NEPSE:
         )
 
         if not error:
-            self.sectors = {sector["id"]: sector["index"] for sector in response.json()}
+            self._sectors = {
+                sector["id"]: sector["index"] for sector in response.json()
+            }
         else:
             logging.error(error)
 
     @staticmethod
-    def _get_sorted_dict(items: dict, top_n: int) -> dict:
-        sorted_items = sorted(
-            items.items(), key=lambda x: x[1]["quantity"], reverse=True
+    def _get_date(date: str) -> datetime.date:
+        if not date:
+            return datetime.today().strftime("%Y-%m-%d")
+        return date
+
+    @staticmethod
+    def _get_sorted_dict(data: dict, top_n: int) -> list:
+        sorted_data = sorted(data.items(), key=lambda x: x[1]["quantity"], reverse=True)
+        return sorted_data[:top_n]
+
+    @staticmethod
+    def _is_floorsheet_available(date):
+        date = datetime.strptime(date, "%Y-%m-%d")
+        if date.weekday() in [4, 5] or date > datetime.today():
+            logging.info(
+                "Sector floorsheet is not available on Friday and Saturday and only available until Today !!!"
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _display_data(symbol: str, top_buy: list, top_sell: list):
+        data = [
+            [
+                "Top Buyer",
+                "Quantity",
+                "Percent",
+                "↕",
+                "Top Seller",
+                "Quantity",
+                "Percent",
+            ],
+        ]
+        for index in range(0, 5):
+            buy_item = top_buy[index]
+            sell_item = top_sell[index]
+            data.append(
+                [
+                    buy_item[0],
+                    locale.format_string("%d", buy_item[1]["quantity"], grouping=True),
+                    buy_item[1]["percent"],
+                    "↕",
+                    sell_item[0],
+                    locale.format_string("%d", sell_item[1]["quantity"], grouping=True),
+                    sell_item[1]["percent"],
+                ]
+            )
+        print(tabulate([symbol], tablefmt="grid"), end="\n")
+        print(
+            tabulate(data, headers="firstrow", tablefmt="fancy_grid"),
+            end="\n\n",
         )
-        return sorted_items[:top_n]
 
     def _get_floorsheet(
         self, symbol: str, date: Union[str, None] = None, top_n: int = 5
-    ):
+    ) -> Union[Tuple[list, list], Tuple[None, None]]:
+        date = self._get_date(date)
+        if not self._is_floorsheet_available(date):
+            return (None, None)
         page_number = 0
         last_page = False
         floorsheet_data = []
-        _id = self.securities[symbol]["id"]
-        if not date:
-            date = datetime.today().strftime("%Y-%m-%d")
+        _id = self._securities[symbol]["id"]
         url = self._create_url(f"/api/nots/security/floorsheet/{_id}")
         while not last_page:
             params = {
@@ -140,7 +190,7 @@ class NEPSE:
                 "page": page_number,
             }
 
-            payload = {"id": 791}
+            payload = {"id": 793}  # TODO: Remove hardcoded value by dynamic id
             headers = {
                 **self._get_common_headers(),
                 "content-type": "application/json",
@@ -191,42 +241,12 @@ class NEPSE:
             top_sell = self._get_sorted_dict(top_sell, top_n)
         return top_buy, top_sell
 
-    @staticmethod
-    def _display_data(symbol: str, top_buy: list, top_sell: list):
-        data = [
-            [
-                "Top Buyer",
-                "Quantity",
-                "Percent",
-                "↕",
-                "Top Seller",
-                "Quantity",
-                "Percent",
-            ],
-        ]
-        for index in range(0, 5):
-            buy_item = top_buy[index]
-            sell_item = top_sell[index]
-            data.append(
-                [
-                    buy_item[0],
-                    locale.format_string("%d", buy_item[1]["quantity"], grouping=True),
-                    buy_item[1]["percent"],
-                    "↕",
-                    sell_item[0],
-                    locale.format_string("%d", sell_item[1]["quantity"], grouping=True),
-                    sell_item[1]["percent"],
-                ]
-            )
-        print(tabulate([symbol], tablefmt="grid"), end="\n")
-        print(
-            tabulate(data, headers="firstrow", tablefmt="fancy_grid"),
-            end="\n\n",
-        )
-
     def _get_sector_floorsheet(
         self, sector_id: int, date: Union[str, None] = None, top_n: int = 5
-    ):
+    ) -> Union[dict, None]:
+        date = self._get_date(date)
+        if not self._is_floorsheet_available(date):
+            return
         url = self._create_url("/api/nots/securityDailyTradeStat/%s" % sector_id)
         headers = {
             **self._get_common_headers(),
@@ -237,8 +257,6 @@ class NEPSE:
         if not error:
             securities = response.json()
             for security in securities:
-                if not date:
-                    date = datetime.today().strftime("%Y-%m-%d")
                 top_buy, top_sell = self._get_floorsheet(
                     security["symbol"], date=date, top_n=top_n
                 )
@@ -251,14 +269,34 @@ class NEPSE:
         return sector_floorsheet
 
     def display_floorsheet(self, symbol: str, date: Union[str, None] = None):
+        date = self._get_date(date)
+        if not self._is_floorsheet_available(date):
+            return
         top_buy, top_sell = self._get_floorsheet(symbol, date)
         self._display_data(symbol, top_buy, top_sell)
 
     def display_sector_floorsheet(
         self, sector_id: int, date: Union[str, None] = None, top_n: int = 5
     ):
+        date = self._get_date(date)
+        if not self._is_floorsheet_available(date):
+            return
         sector_floorsheet = self._get_sector_floorsheet(sector_id, date, top_n)
         for symbol, floorsheet in sector_floorsheet.items():
             top_buy = floorsheet["top_buy"]
             top_sell = floorsheet["top_sell"]
             self._display_data(symbol, top_buy, top_sell)
+
+    def display_sectors(self):
+        data = [["Sector ID", "Sector Name"]]
+        for sector_id, sector_name in self._sectors.items():
+            data.append([sector_id, sector_name])
+        print(tabulate(["SECTORS"], tablefmt="grid"), end="\n")
+        print(tabulate(data, headers="firstrow", tablefmt="fancy_grid"))
+
+    def display_securities(self):
+        data = [["ID", "Symbol", "Name"]]
+        for symbol, security in self._securities.items():
+            data.append([security["id"], symbol, security["securityName"]])
+        print(tabulate(["SECURITIES"], tablefmt="grid"), end="\n")
+        print(tabulate(data, headers="firstrow", tablefmt="fancy_grid"))
