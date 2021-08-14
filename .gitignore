@@ -146,3 +146,4 @@ preopen.py
 continuous.py
 specialpreopen.py
 *.pickle
+chromedriver

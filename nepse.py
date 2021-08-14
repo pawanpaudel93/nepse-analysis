@@ -1,8 +1,9 @@
-import sys
+import os
 import json
-import logging
 import requests
 import locale
+import random
+import pickle
 import functools
 from time import sleep
 from tabulate import tabulate
@@ -12,10 +13,9 @@ from urllib.parse import urljoin
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
+from utils import Payload, get_logger
 
-logging.basicConfig(
-    stream=sys.stdout, level=logging.INFO, format="%(levelname)s: %(message)s"
-)
+logger = get_logger()
 
 locale.setlocale(locale.LC_ALL, "en_IN")
 
@@ -39,6 +39,7 @@ class TimeoutHTTPAdapter(HTTPAdapter):
 
 class NEPSE:
     _base_url = "https://newweb.nepalstock.com"
+    _data_dir = "./data"
     _securities = {}
     _sectors = {}
 
@@ -46,6 +47,9 @@ class NEPSE:
         self._create_session()
         self._get_all_securities()
         self._get_sectors()
+        self._id = Payload().get_id(
+            random.choice(list(self._securities.values()))["securityId"]
+        )
 
     @property
     def base_url(self):
@@ -58,6 +62,14 @@ class NEPSE:
     @property
     def sectors(self):
         return self._sectors
+
+    def _pickle_data(self, name: str, data: dict):
+        with open(os.path.join(self._data_dir, name), "wb") as f:
+            pickle.dump(data, f)
+
+    def _unpickle_data(self, name: str):
+        with open(os.path.join(self._data_dir, name), "rb") as f:
+            return pickle.load(f)
 
     def _check_date_sector(func):
         @functools.wraps(func)
@@ -74,7 +86,7 @@ class NEPSE:
                 symbol_or_sector = None
             if type(symbol_or_sector) == int:
                 if not self._sectors.get(symbol_or_sector):
-                    logging.info(f"Sector {symbol_or_sector} does not exist")
+                    logger.info(f"Sector {symbol_or_sector} does not exist")
                     self.display_sectors()
                     return
 
@@ -84,10 +96,10 @@ class NEPSE:
                 else:
                     date = datetime.strptime(date, "%Y-%m-%d")
             except ValueError as error:
-                logging.error(error)
+                logger.error(error)
             else:
                 if date.weekday() in [4, 5] or date > datetime.today():
-                    logging.info(
+                    logger.info(
                         "Sector floorsheet is not available on Friday and Saturday and only available until Today !!!"
                     )
                 else:
@@ -147,27 +159,28 @@ class NEPSE:
                 security["symbol"]: security for security in response.json()
             }
         else:
-            logging.error(error)
+            logger.error(error)
 
     def _get_sectors(self):
+        if os.path.exists(os.path.join(self._data_dir, "sectors.pkl")):
+            self._sectors = self._unpickle_data("sectors.pkl")
+            return
         url = self._create_url("/api/nots")
 
-        payload = {}
         headers = {
             **self._get_common_headers(),
             "referer": "https://newweb.nepalstock.com/",
         }
 
-        response, error = self._perform_request(
-            "GET", url, headers=headers, data=payload
-        )
+        response, error = self._perform_request("GET", url, headers=headers, data={})
 
         if not error:
             self._sectors = {
                 sector["id"]: sector["index"] for sector in response.json()
             }
+            self._pickle_data("sectors.pkl", self._sectors)
         else:
-            logging.error(error)
+            logger.error(error)
 
     @staticmethod
     def _get_sorted_list(data: dict, top_n: Union[int, None] = None) -> list:
@@ -230,7 +243,7 @@ class NEPSE:
                 "page": page_number,
             }
 
-            payload = {"id": 357}  # TODO: Remove hardcoded value by dynamic id
+            payload = {"id": self._id}
             headers = {
                 **self._get_common_headers(),
                 "content-type": "application/json",
@@ -249,7 +262,7 @@ class NEPSE:
                 if not floorsheet["empty"]:
                     floorsheet_data.extend(floorsheet["content"])
             else:
-                logging.error(error)
+                logger.error(error)
             page_number += 1
         top_buy, top_sell = {}, {}
         if len(floorsheet_data) > 0:
@@ -303,7 +316,7 @@ class NEPSE:
                     "top_sell": top_sell,
                 }
         else:
-            logging.error(error)
+            logger.error(error)
         return sector_floorsheet
 
     @_check_date_sector
@@ -343,7 +356,7 @@ class NEPSE:
             "change": "percentageChange",
         }
         if order_by not in data_mapping.keys():
-            logging.info(
+            logger.info(
                 f"Cannot order by {order_by}. It can be order by only one of {list(data_mapping.keys())}"
             )
             return
