@@ -77,22 +77,23 @@ class NEPSE:
                     logging.info(f"Sector {symbol_or_sector} does not exist")
                     self.display_sectors()
                     return
-            if not date:
-                date = datetime.today()
-            else:
-                try:
-                    date = datetime.strptime(date, "%Y-%m-%d")
-                except ValueError as error:
-                    logging.error(error)
+
+            try:
+                if not date or type(date) != str:
+                    date = datetime.today()
                 else:
-                    if date.weekday() in [4, 5] or date > datetime.today():
-                        logging.info(
-                            "Sector floorsheet is not available on Friday and Saturday and only available until Today !!!"
-                        )
-                    else:
-                        value = func(self, *args, **kwargs)
-                        if value:
-                            return value
+                    date = datetime.strptime(date, "%Y-%m-%d")
+            except ValueError as error:
+                logging.error(error)
+            else:
+                if date.weekday() in [4, 5] or date > datetime.today():
+                    logging.info(
+                        "Sector floorsheet is not available on Friday and Saturday and only available until Today !!!"
+                    )
+                else:
+                    value = func(self, *args, **kwargs)
+                    if value:
+                        return value
 
         return wrapper
 
