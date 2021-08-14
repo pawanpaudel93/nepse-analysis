@@ -122,9 +122,9 @@ class NEPSE:
         return date
 
     @staticmethod
-    def _get_sorted_dict(data: dict, top_n: int) -> list:
+    def _get_sorted_list(data: dict, top_n: Union[int, None] = None) -> list:
         sorted_data = sorted(data.items(), key=lambda x: x[1]["quantity"], reverse=True)
-        return sorted_data[:top_n]
+        return sorted_data[:top_n] if top_n else sorted_data
 
     @staticmethod
     def _is_floorsheet_available(date):
@@ -136,8 +136,7 @@ class NEPSE:
             return False
         return True
 
-    @staticmethod
-    def _display_data(symbol: str, top_buy: list, top_sell: list):
+    def _display_data(self, symbol: str, top_buy: list, top_sell: list):
         data = [
             [
                 "Top Buyer",
@@ -155,11 +154,11 @@ class NEPSE:
             data.append(
                 [
                     buy_item[0],
-                    locale.format_string("%d", buy_item[1]["quantity"], grouping=True),
+                    self._format_number(buy_item[1]["quantity"]),
                     buy_item[1]["percent"],
                     "↕",
                     sell_item[0],
-                    locale.format_string("%d", sell_item[1]["quantity"], grouping=True),
+                    self._format_number(sell_item[1]["quantity"]),
                     sell_item[1]["percent"],
                 ]
             )
@@ -169,8 +168,15 @@ class NEPSE:
             end="\n\n",
         )
 
+    @staticmethod
+    def _format_number(number) -> str:
+        return locale.format_string("%d", number, grouping=True)
+
     def _get_floorsheet(
-        self, symbol: str, date: Union[str, None] = None, top_n: int = 5
+        self,
+        symbol: str,
+        date: Union[str, None] = None,
+        top_n: Union[int, None] = 5,
     ) -> Union[Tuple[list, list], Tuple[None, None]]:
         date = self._get_date(date)
         if not self._is_floorsheet_available(date):
@@ -178,7 +184,7 @@ class NEPSE:
         page_number = 0
         last_page = False
         floorsheet_data = []
-        _id = self.securities[symbol]["id"]
+        _id = self.securities[symbol]["securityId"]
         url = self._create_url(f"/api/nots/security/floorsheet/{_id}")
         while not last_page:
             params = {
@@ -188,7 +194,7 @@ class NEPSE:
                 "page": page_number,
             }
 
-            payload = {"id": 793}  # TODO: Remove hardcoded value by dynamic id
+            payload = {"id": 459}  # TODO: Remove hardcoded value by dynamic id
             headers = {
                 **self._get_common_headers(),
                 "content-type": "application/json",
@@ -235,15 +241,19 @@ class NEPSE:
                 top_buy[k]["percent"] = round(v["quantity"] * 100 / total_quantity, 2)
             for k, v in top_sell.items():
                 top_sell[k]["percent"] = round(v["quantity"] * 100 / total_quantity, 2)
-            top_buy = self._get_sorted_dict(top_buy, top_n)
-            top_sell = self._get_sorted_dict(top_sell, top_n)
+            top_buy = self._get_sorted_list(top_buy, top_n)
+            top_sell = self._get_sorted_list(top_sell, top_n)
         return top_buy, top_sell
 
     def _get_sector_floorsheet(
-        self, sector_id: int, date: Union[str, None] = None, top_n: int = 5
+        self, sector_id: int, date: Union[str, None] = None, top_n: Union[None, int] = 5
     ) -> Union[dict, None]:
         date = self._get_date(date)
         if not self._is_floorsheet_available(date):
+            return
+        if not self.sectors.get(sector_id):
+            logging.info(f"Sector {sector_id} does not exist")
+            self.display_sectors()
             return
         url = self._create_url("/api/nots/securityDailyTradeStat/%s" % sector_id)
         headers = {
@@ -338,12 +348,12 @@ class NEPSE:
                 [
                     symbol,
                     security["securityName"],
-                    security["openPrice"],
-                    security["highPrice"],
-                    security["lowPrice"],
-                    security["lastTradedPrice"],
-                    security["previousClose"],
-                    security["totalTradeQuantity"],
+                    self._format_number(security["openPrice"]),
+                    self._format_number(security["highPrice"]),
+                    self._format_number(security["lowPrice"]),
+                    self._format_number(security["lastTradedPrice"]),
+                    self._format_number(security["totalTradeQuantity"]),
+                    self._format_number(security["totalTradeQuantity"]),
                     round(security["percentageChange"], 2),
                 ]
                 for symbol, security in securities
@@ -351,3 +361,55 @@ class NEPSE:
         )
         print(tabulate(["SECURITIES"], tablefmt="grid"), end="\n")
         print(tabulate(data, headers="firstrow", tablefmt="fancy_grid"))
+
+    def display_sector_broker_trade(
+        self, sector_id: int, date: Union[str, None] = None, top_n: int = 5
+    ):
+        date = self._get_date(date)
+        if not self._is_floorsheet_available(date):
+            return
+        if not self.sectors.get(sector_id):
+            logging.info(f"Sector {sector_id} does not exist")
+            self.display_sectors()
+            return
+        sector_analysis = {"top_buy": {}, "top_sell": {}}
+        sector_floorsheet = self._get_sector_floorsheet(sector_id, date, top_n=None)
+        for _, floorsheet in sector_floorsheet.items():
+            top_buy = floorsheet["top_buy"]
+            top_sell = floorsheet["top_sell"]
+            top_buy_total = 0
+            top_sell_total = 0
+            for broker in top_buy:
+                try:
+                    sector_analysis["top_buy"][broker[0]]["quantity"] += broker[1][
+                        "quantity"
+                    ]
+                except KeyError:
+                    sector_analysis["top_buy"][broker[0]] = {"quantity": 0}
+                    sector_analysis["top_buy"][broker[0]]["quantity"] = broker[1][
+                        "quantity"
+                    ]
+                top_buy_total += broker[1]["quantity"]
+            for broker in top_sell:
+                try:
+                    sector_analysis["top_sell"][broker[0]]["quantity"] += broker[1][
+                        "quantity"
+                    ]
+                except KeyError:
+                    sector_analysis["top_sell"][broker[0]] = {"quantity": 0}
+                    sector_analysis["top_sell"][broker[0]]["quantity"] += broker[1][
+                        "quantity"
+                    ]
+                top_sell_total += broker[1]["quantity"]
+            for broker in sector_analysis["top_buy"]:
+                sector_analysis["top_buy"][broker]["percent"] = round(
+                    sector_analysis["top_buy"][broker]["quantity"] / top_buy_total, 2
+                )
+            for broker in sector_analysis["top_sell"]:
+                sector_analysis["top_sell"][broker]["percent"] = round(
+                    sector_analysis["top_sell"][broker]["quantity"] / top_sell_total, 2
+                )
+
+        top_buy = self._get_sorted_list(sector_analysis["top_buy"], top_n=top_n)
+        top_sell = self._get_sorted_list(sector_analysis["top_sell"], top_n=top_n)
+        self._display_data(self.sectors.get(sector_id), top_buy, top_sell)
