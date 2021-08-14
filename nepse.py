@@ -37,7 +37,7 @@ class TimeoutHTTPAdapter(HTTPAdapter):
 
 class NEPSE:
     _base_url = "https://newweb.nepalstock.com"
-    _securities = {}
+    securities = {}
     sectors = {}
 
     def __init__(self) -> None:
@@ -82,7 +82,7 @@ class NEPSE:
             return response, None
 
     def _get_all_securities(self):
-        url = self._create_url("/api/nots/security?nonDelisted=true")
+        url = self._create_url("/api/nots/securityDailyTradeStat/58")
 
         headers = {
             **self._get_common_headers(),
@@ -91,7 +91,7 @@ class NEPSE:
 
         response, error = self._perform_request("GET", url, headers=headers, data={})
         if not error:
-            self._securities = {
+            self.securities = {
                 security["symbol"]: security for security in response.json()
             }
         else:
@@ -111,9 +111,7 @@ class NEPSE:
         )
 
         if not error:
-            self._sectors = {
-                sector["id"]: sector["index"] for sector in response.json()
-            }
+            self.sectors = {sector["id"]: sector["index"] for sector in response.json()}
         else:
             logging.error(error)
 
@@ -180,7 +178,7 @@ class NEPSE:
         page_number = 0
         last_page = False
         floorsheet_data = []
-        _id = self._securities[symbol]["id"]
+        _id = self.securities[symbol]["id"]
         url = self._create_url(f"/api/nots/security/floorsheet/{_id}")
         while not last_page:
             params = {
@@ -289,14 +287,67 @@ class NEPSE:
 
     def display_sectors(self):
         data = [["Sector ID", "Sector Name"]]
-        for sector_id, sector_name in self._sectors.items():
+        for sector_id, sector_name in self.sectors.items():
             data.append([sector_id, sector_name])
         print(tabulate(["SECTORS"], tablefmt="grid"), end="\n")
         print(tabulate(data, headers="firstrow", tablefmt="fancy_grid"))
 
-    def display_securities(self):
-        data = [["ID", "Symbol", "Name"]]
-        for symbol, security in self._securities.items():
-            data.append([security["id"], symbol, security["securityName"]])
+    def display_securities(
+        self, top_n: Union[int, None] = None, order_by: str = "symbol", asc: bool = True
+    ):
+        data_mapping = {
+            "symbol": "symbol",
+            "name": "securityName",
+            "open": "openPrice",
+            "high": "highPrice",
+            "low": "lowPrice",
+            "ltp": "lastTradedPrice",
+            "prev.close": "previousClose",
+            "volume": "totalTradeQuantity",
+            "change": "percentageChange",
+        }
+        if order_by not in data_mapping.keys():
+            logging.info(
+                f"Cannot order by {order_by}. It can be order by only one of {list(data_mapping.keys())}"
+            )
+            return
+        data = [
+            [
+                "Symbol",
+                "Name",
+                "Open",
+                "High",
+                "Low",
+                "LTP",
+                "Prev. Close",
+                "Volume",
+                "Change(%)",
+            ]
+        ]
+
+        if data_mapping.get(order_by):
+            securities = sorted(
+                self.securities.items(),
+                key=lambda x: x[1][data_mapping[order_by]],
+                reverse=not asc,
+            )
+        if top_n:
+            securities = securities[:top_n]
+        data.extend(
+            [
+                [
+                    symbol,
+                    security["securityName"],
+                    security["openPrice"],
+                    security["highPrice"],
+                    security["lowPrice"],
+                    security["lastTradedPrice"],
+                    security["previousClose"],
+                    security["totalTradeQuantity"],
+                    round(security["percentageChange"], 2),
+                ]
+                for symbol, security in securities
+            ]
+        )
         print(tabulate(["SECURITIES"], tablefmt="grid"), end="\n")
         print(tabulate(data, headers="firstrow", tablefmt="fancy_grid"))
