@@ -3,6 +3,7 @@ import json
 import logging
 import requests
 import locale
+import functools
 from time import sleep
 from tabulate import tabulate
 from datetime import datetime
@@ -10,6 +11,7 @@ from typing import Tuple, Union
 from urllib.parse import urljoin
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
+
 
 logging.basicConfig(
     stream=sys.stdout, level=logging.INFO, format="%(levelname)s: %(message)s"
@@ -37,13 +39,62 @@ class TimeoutHTTPAdapter(HTTPAdapter):
 
 class NEPSE:
     _base_url = "https://newweb.nepalstock.com"
-    securities = {}
-    sectors = {}
+    _securities = {}
+    _sectors = {}
 
     def __init__(self) -> None:
         self._create_session()
         self._get_all_securities()
         self._get_sectors()
+
+    @property
+    def base_url(self):
+        return self._base_url
+
+    @property
+    def securities(self) -> dict:
+        return self._securities
+
+    @property
+    def sectors(self):
+        return self._sectors
+
+    def _check_date_sector(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            try:
+                date = kwargs.get("date") or args[1]
+            except IndexError:
+                date = None
+            try:
+                symbol_or_sector = (
+                    kwargs.get("symbol") or kwargs.get("sector_id") or args[0]
+                )
+            except IndexError:
+                symbol_or_sector = None
+            if type(symbol_or_sector) == int:
+                if not self._sectors.get(symbol_or_sector):
+                    logging.info(f"Sector {symbol_or_sector} does not exist")
+                    self.display_sectors()
+                    return
+            if not date:
+                date = datetime.today()
+            else:
+                try:
+                    date = datetime.strptime(date, "%Y-%m-%d")
+                except ValueError as error:
+                    logging.error(error)
+                else:
+                    if date.weekday() in [4, 5] or date > datetime.today():
+                        logging.info(
+                            "Sector floorsheet is not available on Friday and Saturday and only available until Today !!!"
+                        )
+                    else:
+                        value = func(self, *args, **kwargs)
+                        if value:
+                            return value
+
+        return wrapper
 
     def _create_session(self) -> None:
         self._session = requests.Session()
@@ -91,7 +142,7 @@ class NEPSE:
 
         response, error = self._perform_request("GET", url, headers=headers, data={})
         if not error:
-            self.securities = {
+            self._securities = {
                 security["symbol"]: security for security in response.json()
             }
         else:
@@ -111,30 +162,16 @@ class NEPSE:
         )
 
         if not error:
-            self.sectors = {sector["id"]: sector["index"] for sector in response.json()}
+            self._sectors = {
+                sector["id"]: sector["index"] for sector in response.json()
+            }
         else:
             logging.error(error)
-
-    @staticmethod
-    def _get_date(date: str) -> datetime.date:
-        if not date:
-            return datetime.today().strftime("%Y-%m-%d")
-        return date
 
     @staticmethod
     def _get_sorted_list(data: dict, top_n: Union[int, None] = None) -> list:
         sorted_data = sorted(data.items(), key=lambda x: x[1]["quantity"], reverse=True)
         return sorted_data[:top_n] if top_n else sorted_data
-
-    @staticmethod
-    def _is_floorsheet_available(date):
-        date = datetime.strptime(date, "%Y-%m-%d")
-        if date.weekday() in [4, 5] or date > datetime.today():
-            logging.info(
-                "Sector floorsheet is not available on Friday and Saturday and only available until Today !!!"
-            )
-            return False
-        return True
 
     def _display_data(self, symbol: str, top_buy: list, top_sell: list):
         data = [
@@ -172,19 +209,17 @@ class NEPSE:
     def _format_number(number) -> str:
         return locale.format_string("%d", number, grouping=True)
 
+    @_check_date_sector
     def _get_floorsheet(
         self,
         symbol: str,
         date: Union[str, None] = None,
         top_n: Union[int, None] = 5,
     ) -> Union[Tuple[list, list], Tuple[None, None]]:
-        date = self._get_date(date)
-        if not self._is_floorsheet_available(date):
-            return (None, None)
         page_number = 0
         last_page = False
         floorsheet_data = []
-        _id = self.securities[symbol]["securityId"]
+        _id = self._securities[symbol]["securityId"]
         url = self._create_url(f"/api/nots/security/floorsheet/{_id}")
         while not last_page:
             params = {
@@ -194,7 +229,7 @@ class NEPSE:
                 "page": page_number,
             }
 
-            payload = {"id": 459}  # TODO: Remove hardcoded value by dynamic id
+            payload = {"id": 357}  # TODO: Remove hardcoded value by dynamic id
             headers = {
                 **self._get_common_headers(),
                 "content-type": "application/json",
@@ -245,16 +280,10 @@ class NEPSE:
             top_sell = self._get_sorted_list(top_sell, top_n)
         return top_buy, top_sell
 
+    @_check_date_sector
     def _get_sector_floorsheet(
         self, sector_id: int, date: Union[str, None] = None, top_n: Union[None, int] = 5
     ) -> Union[dict, None]:
-        date = self._get_date(date)
-        if not self._is_floorsheet_available(date):
-            return
-        if not self.sectors.get(sector_id):
-            logging.info(f"Sector {sector_id} does not exist")
-            self.display_sectors()
-            return
         url = self._create_url("/api/nots/securityDailyTradeStat/%s" % sector_id)
         headers = {
             **self._get_common_headers(),
@@ -276,19 +305,15 @@ class NEPSE:
             logging.error(error)
         return sector_floorsheet
 
+    @_check_date_sector
     def display_floorsheet(self, symbol: str, date: Union[str, None] = None):
-        date = self._get_date(date)
-        if not self._is_floorsheet_available(date):
-            return
         top_buy, top_sell = self._get_floorsheet(symbol, date)
         self._display_data(symbol, top_buy, top_sell)
 
+    @_check_date_sector
     def display_sector_floorsheet(
         self, sector_id: int, date: Union[str, None] = None, top_n: int = 5
     ):
-        date = self._get_date(date)
-        if not self._is_floorsheet_available(date):
-            return
         sector_floorsheet = self._get_sector_floorsheet(sector_id, date, top_n)
         for symbol, floorsheet in sector_floorsheet.items():
             top_buy = floorsheet["top_buy"]
@@ -297,7 +322,7 @@ class NEPSE:
 
     def display_sectors(self):
         data = [["Sector ID", "Sector Name"]]
-        for sector_id, sector_name in self.sectors.items():
+        for sector_id, sector_name in self._sectors.items():
             data.append([sector_id, sector_name])
         print(tabulate(["SECTORS"], tablefmt="grid"), end="\n")
         print(tabulate(data, headers="firstrow", tablefmt="fancy_grid"))
@@ -337,7 +362,7 @@ class NEPSE:
 
         if data_mapping.get(order_by):
             securities = sorted(
-                self.securities.items(),
+                self._securities.items(),
                 key=lambda x: x[1][data_mapping[order_by]],
                 reverse=not asc,
             )
@@ -362,16 +387,10 @@ class NEPSE:
         print(tabulate(["SECURITIES"], tablefmt="grid"), end="\n")
         print(tabulate(data, headers="firstrow", tablefmt="fancy_grid"))
 
+    @_check_date_sector
     def display_sector_broker_trade(
         self, sector_id: int, date: Union[str, None] = None, top_n: int = 5
     ):
-        date = self._get_date(date)
-        if not self._is_floorsheet_available(date):
-            return
-        if not self.sectors.get(sector_id):
-            logging.info(f"Sector {sector_id} does not exist")
-            self.display_sectors()
-            return
         sector_analysis = {"top_buy": {}, "top_sell": {}}
         sector_floorsheet = self._get_sector_floorsheet(sector_id, date, top_n=None)
         for _, floorsheet in sector_floorsheet.items():
@@ -412,4 +431,4 @@ class NEPSE:
 
         top_buy = self._get_sorted_list(sector_analysis["top_buy"], top_n=top_n)
         top_sell = self._get_sorted_list(sector_analysis["top_sell"], top_n=top_n)
-        self._display_data(self.sectors.get(sector_id), top_buy, top_sell)
+        self._display_data(self._sectors.get(sector_id), top_buy, top_sell)
