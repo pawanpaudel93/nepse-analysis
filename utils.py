@@ -1,5 +1,6 @@
 import logging
 from time import sleep
+
 import seleniumwire.undetected_chromedriver as uc
 
 logging.getLogger("seleniumwire").setLevel(logging.CRITICAL)
@@ -20,9 +21,7 @@ class Payload:
         self._id = eval(request.body.decode("utf-8"))["id"]
 
     def get_id(self, security_id):
-        self._driver.get(
-            "https://newweb.nepalstock.com/company/detail/%s" % security_id
-        )
+        self._driver.get("https://newweb.nepalstock.com/company/detail/%s" % security_id)
         while not self._id:
             sleep(0.1)
         self._driver.quit()

@@ -1,17 +1,18 @@
-import os
-import json
-import requests
-import locale
-import random
-import pickle
 import functools
-from time import sleep
-from tabulate import tabulate
+import json
+import locale
+import os
+import pickle
+import random
 from datetime import datetime
+from time import sleep
 from typing import Tuple, Union
 from urllib.parse import urljoin
-from urllib3.util.retry import Retry
+
+import requests
 from requests.adapters import HTTPAdapter
+from tabulate import tabulate
+from urllib3.util.retry import Retry
 
 from utils import Payload, get_logger
 
@@ -21,7 +22,7 @@ locale.setlocale(locale.LC_ALL, "en_IN")
 
 
 class TimeoutHTTPAdapter(HTTPAdapter):
-    DEFAULT_TIMEOUT = 5
+    DEFAULT_TIMEOUT = 10
 
     def __init__(self, *args, **kwargs):
         self.timeout = self.DEFAULT_TIMEOUT
@@ -47,9 +48,7 @@ class NEPSE:
         self._create_session()
         self._get_all_securities()
         self._get_sectors()
-        self._id = Payload().get_id(
-            random.choice(list(self._securities.values()))["securityId"]
-        )
+        self._id = Payload().get_id(random.choice(list(self._securities.values()))["securityId"])
 
     @property
     def base_url(self):
@@ -79,9 +78,7 @@ class NEPSE:
             except IndexError:
                 date = None
             try:
-                symbol_or_sector = (
-                    kwargs.get("symbol") or kwargs.get("sector_id") or args[0]
-                )
+                symbol_or_sector = kwargs.get("symbol") or kwargs.get("sector_id") or args[0]
             except IndexError:
                 symbol_or_sector = None
             if type(symbol_or_sector) == int:
@@ -111,9 +108,7 @@ class NEPSE:
 
     def _create_session(self) -> None:
         self._session = requests.Session()
-        retries = Retry(
-            total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504]
-        )
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
         adapter = TimeoutHTTPAdapter(max_retries=retries)
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
@@ -133,9 +128,7 @@ class NEPSE:
     def _create_url(self, url) -> str:
         return urljoin(self._base_url, url)
 
-    def _perform_request(
-        self, *args, **kwargs
-    ) -> Tuple[Union[requests.Response, None], Union[str, None]]:
+    def _perform_request(self, *args, **kwargs) -> Tuple[Union[requests.Response, None], Union[str, None]]:
         try:
             sleep(0.5)
             response = self._session.request(*args, **kwargs)
@@ -155,9 +148,7 @@ class NEPSE:
 
         response, error = self._perform_request("GET", url, headers=headers, data={})
         if not error:
-            self._securities = {
-                security["symbol"]: security for security in response.json()
-            }
+            self._securities = {security["symbol"]: security for security in response.json()}
         else:
             logger.error(error)
 
@@ -175,9 +166,7 @@ class NEPSE:
         response, error = self._perform_request("GET", url, headers=headers, data={})
 
         if not error:
-            self._sectors = {
-                sector["id"]: sector["index"] for sector in response.json()
-            }
+            self._sectors = {sector["id"]: sector["index"] for sector in response.json()}
             self._pickle_data("sectors.pkl", self._sectors)
         else:
             logger.error(error)
@@ -230,6 +219,8 @@ class NEPSE:
         date: Union[str, None] = None,
         top_n: Union[int, None] = 5,
     ) -> Union[Tuple[list, list], Tuple[None, None]]:
+        if not date:
+            date = datetime.now().strftime("%Y-%m-%d")
         page_number = 0
         last_page = False
         floorsheet_data = []
@@ -308,9 +299,7 @@ class NEPSE:
         if not error:
             securities = response.json()
             for security in securities:
-                top_buy, top_sell = self._get_floorsheet(
-                    security["symbol"], date=date, top_n=top_n
-                )
+                top_buy, top_sell = self._get_floorsheet(security["symbol"], date=date, top_n=top_n)
                 sector_floorsheet[security["symbol"]] = {
                     "top_buy": top_buy,
                     "top_sell": top_sell,
@@ -325,9 +314,7 @@ class NEPSE:
         self._display_data(symbol, top_buy, top_sell)
 
     @_check_date_sector
-    def display_sector_floorsheet(
-        self, sector_id: int, date: Union[str, None] = None, top_n: int = 5
-    ):
+    def display_sector_floorsheet(self, sector_id: int, date: Union[str, None] = None, top_n: int = 5):
         sector_floorsheet = self._get_sector_floorsheet(sector_id, date, top_n)
         for symbol, floorsheet in sector_floorsheet.items():
             top_buy = floorsheet["top_buy"]
@@ -341,9 +328,7 @@ class NEPSE:
         print(tabulate(["SECTORS"], tablefmt="grid"), end="\n")
         print(tabulate(data, headers="firstrow", tablefmt="fancy_grid"))
 
-    def display_securities(
-        self, top_n: Union[int, None] = None, order_by: str = "symbol", asc: bool = True
-    ):
+    def display_securities(self, top_n: Union[int, None] = None, order_by: str = "symbol", asc: bool = True):
         data_mapping = {
             "symbol": "symbol",
             "name": "securityName",
@@ -356,9 +341,7 @@ class NEPSE:
             "change": "percentageChange",
         }
         if order_by not in data_mapping.keys():
-            logger.info(
-                f"Cannot order by {order_by}. It can be order by only one of {list(data_mapping.keys())}"
-            )
+            logger.info(f"Cannot order by {order_by}. It can be order by only one of {list(data_mapping.keys())}")
             return
         data = [
             [
@@ -402,9 +385,7 @@ class NEPSE:
         print(tabulate(data, headers="firstrow", tablefmt="fancy_grid"))
 
     @_check_date_sector
-    def display_sector_broker_trade(
-        self, sector_id: int, date: Union[str, None] = None, top_n: int = 5
-    ):
+    def display_sector_broker_trade(self, sector_id: int, date: Union[str, None] = None, top_n: int = 5):
         sector_analysis = {"top_buy": {}, "top_sell": {}}
         sector_floorsheet = self._get_sector_floorsheet(sector_id, date, top_n=None)
         for _, floorsheet in sector_floorsheet.items():
@@ -414,25 +395,17 @@ class NEPSE:
             top_sell_total = 0
             for broker in top_buy:
                 try:
-                    sector_analysis["top_buy"][broker[0]]["quantity"] += broker[1][
-                        "quantity"
-                    ]
+                    sector_analysis["top_buy"][broker[0]]["quantity"] += broker[1]["quantity"]
                 except KeyError:
                     sector_analysis["top_buy"][broker[0]] = {"quantity": 0}
-                    sector_analysis["top_buy"][broker[0]]["quantity"] = broker[1][
-                        "quantity"
-                    ]
+                    sector_analysis["top_buy"][broker[0]]["quantity"] = broker[1]["quantity"]
                 top_buy_total += broker[1]["quantity"]
             for broker in top_sell:
                 try:
-                    sector_analysis["top_sell"][broker[0]]["quantity"] += broker[1][
-                        "quantity"
-                    ]
+                    sector_analysis["top_sell"][broker[0]]["quantity"] += broker[1]["quantity"]
                 except KeyError:
                     sector_analysis["top_sell"][broker[0]] = {"quantity": 0}
-                    sector_analysis["top_sell"][broker[0]]["quantity"] += broker[1][
-                        "quantity"
-                    ]
+                    sector_analysis["top_sell"][broker[0]]["quantity"] += broker[1]["quantity"]
                 top_sell_total += broker[1]["quantity"]
             for broker in sector_analysis["top_buy"]:
                 sector_analysis["top_buy"][broker]["percent"] = round(
