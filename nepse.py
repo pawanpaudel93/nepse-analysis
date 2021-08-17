@@ -43,12 +43,14 @@ class NEPSE:
     _data_dir = "./data"
     _securities = {}
     _sectors = {}
+    _holidays = []
 
-    def __init__(self) -> None:
+    def __init__(self, id=None) -> None:
         self._create_session()
         self._get_all_securities()
         self._get_sectors()
-        self._id = Payload().get_id(random.choice(list(self._securities.values()))["securityId"])
+        self._get_holidays()
+        self._id = id if id else Payload().get_id(random.choice(list(self._securities.values()))["securityId"])
 
     @property
     def base_url(self):
@@ -95,10 +97,8 @@ class NEPSE:
             except ValueError as error:
                 logger.error(error)
             else:
-                if date.weekday() in [4, 5] or date > datetime.today():
-                    logger.info(
-                        "Sector floorsheet is not available on Friday and Saturday and only available until Today !!!"
-                    )
+                if date.weekday() in [4, 5] or date > datetime.today() or date in self._holidays:
+                    logger.info("Floorsheet is not available on Friday and Saturday and Holidays !!!")
                 else:
                     value = func(self, *args, **kwargs)
                     if value:
@@ -130,13 +130,25 @@ class NEPSE:
 
     def _perform_request(self, *args, **kwargs) -> Tuple[Union[requests.Response, None], Union[str, None]]:
         try:
-            sleep(0.1)
+            sleep(0.3)
             response = self._session.request(*args, **kwargs)
             response.raise_for_status()
         except BaseException as error:
             return None, error
         else:
             return response, None
+
+    def _get_holidays(self):
+        year = datetime.today().year
+        url = self._create_url("/api/nots/holiday/list?year=%s" % year)
+        headers = {
+            **self._get_common_headers(),
+            'referer': '%s/holiday-listing' % self._base_url,
+        }
+
+        response, error = self._perform_request("GET", url, headers=headers, data={})
+        if not error:
+            self._holidays = [holiday['holidayDate'] for holiday in response.json()]
 
     def _get_all_securities(self):
         url = self._create_url("/api/nots/securityDailyTradeStat/58")
@@ -160,7 +172,7 @@ class NEPSE:
 
         headers = {
             **self._get_common_headers(),
-            "referer": "https://newweb.nepalstock.com/",
+            "referer": self._base_url,
         }
 
         response, error = self._perform_request("GET", url, headers=headers, data={})
@@ -176,7 +188,7 @@ class NEPSE:
         sorted_data = sorted(data.items(), key=lambda x: x[1]["quantity"], reverse=True)
         return sorted_data[:top_n] if top_n else sorted_data
 
-    def _display_data(self, symbol: str, top_buy: list, top_sell: list):
+    def _display_data(self, symbol: str, top_buy: list, top_sell: list, top_n: int):
         data = [
             [
                 "Top Buyer",
@@ -188,20 +200,23 @@ class NEPSE:
                 "Percent",
             ],
         ]
-        for index in range(0, 5):
-            buy_item = top_buy[index]
-            sell_item = top_sell[index]
-            data.append(
-                [
-                    buy_item[0],
-                    self._format_number(buy_item[1]["quantity"]),
-                    buy_item[1]["percent"],
-                    "↕",
-                    sell_item[0],
-                    self._format_number(sell_item[1]["quantity"]),
-                    sell_item[1]["percent"],
-                ]
-            )
+        for index in range(0, top_n):
+            try:
+                buy_item = top_buy[index]
+                sell_item = top_sell[index]
+                data.append(
+                    [
+                        buy_item[0],
+                        self._format_number(buy_item[1]["quantity"]),
+                        buy_item[1]["percent"],
+                        "↕",
+                        sell_item[0],
+                        self._format_number(sell_item[1]["quantity"]),
+                        sell_item[1]["percent"],
+                    ]
+                )
+            except IndexError:
+                pass
         print(tabulate([symbol], tablefmt="grid"), end="\n")
         print(
             tabulate(data, headers="firstrow", tablefmt="fancy_grid"),
@@ -308,15 +323,19 @@ class NEPSE:
             logger.error(error)
         return sector_floorsheet
 
+    @staticmethod
+    def _get_date_range(start_date: str, end_date: str) -> list:
+        start_date = datetime.strptime(start_date, "%Y-%m-%d")
+        end_date = datetime.strptime(end_date, "%Y-%m-%d")
+        return [start_date + timedelta(days=x) for x in range((end_date - start_date).days + 1)]
+
     def _get_floorsheet_by_range(
         self,
         symbol: str,
         start_date: str,
         end_date: str,
     ) -> Union[dict, None]:
-        start_date = datetime.strptime(start_date, "%Y-%m-%d")
-        end_date = datetime.strptime(end_date, "%Y-%m-%d")
-        date_range = [start_date + timedelta(days=x) for x in range((end_date - start_date).days + 1)]
+        date_range = self._get_date_range(start_date, end_date)
         final_data = {}
         for date in date_range:
             floorsheet = self._get_floorsheet(symbol, date.strftime("%Y-%m-%d"), top_n=None)
@@ -336,10 +355,56 @@ class NEPSE:
                         final_data[sell[0]]["sell"] += sell[1]["quantity"]
         return final_data
 
+    def _get_sector_floorsheet_by_range(self, sector_id: int, start_date: str, end_date: str):
+        date_range = self._get_date_range(start_date, end_date)
+        final_data = {}
+        for date in date_range:
+            sector_floorsheet = self._get_sector_floorsheet(sector_id, date.strftime("%Y-%m-%d"), top_n=None)
+            if sector_floorsheet:
+                for symbol, floorsheet in sector_floorsheet.items():
+                    top_buy, top_sell = floorsheet["top_buy"], floorsheet["top_sell"]
+                    for buy in top_buy:
+                        if symbol in final_data:
+                            if buy[0] in final_data[symbol]:
+                                final_data[symbol][buy[0]]["buy"] += buy[1]["quantity"]
+                            else:
+                                final_data[symbol][buy[0]] = {"buy": 0, "sell": 0}
+                                final_data[symbol][buy[0]]["buy"] += buy[1]["quantity"]
+                        else:
+                            final_data[symbol] = {buy[0]: {"buy": 0, "sell": 0}}
+                            final_data[symbol][buy[0]]["buy"] += buy[1]["quantity"]
+                    for sell in top_sell:
+                        if symbol in final_data:
+                            if sell[0] in final_data[symbol]:
+                                final_data[symbol][sell[0]]["sell"] += sell[1]["quantity"]
+                            else:
+                                final_data[symbol][sell[0]] = {"buy": 0, "sell": 0}
+                                final_data[symbol][sell[0]]["sell"] += sell[1]["quantity"]
+                        else:
+                            final_data[symbol] = {sell[0]: {"buy": 0, "sell": 0}}
+                            final_data[symbol][sell[0]]["sell"] += sell[1]["quantity"]
+        return final_data
+
     @_check_date_sector
-    def display_floorsheet(self, symbol: str, date: Union[str, None] = None):
-        top_buy, top_sell = self._get_floorsheet(symbol, date)
-        self._display_data(symbol, top_buy, top_sell)
+    def display_security_floorsheet(self, symbol: str, date: Union[str, None] = None, top_n: Union[None, int] = 5):
+        top_buy, top_sell = self._get_floorsheet(symbol, date, top_n)
+        self._display_data(symbol, top_buy, top_sell, top_n)
+
+    def display_security_combined_floorsheet(self, symbol: str, start_date: str, end_date: str, order_by: str = "buy"):
+        if order_by not in ["buy", "sell"]:
+            logger.info(f"Cannot order by {order_by}. It can be order by only one of {['buy', 'sell']}")
+            return
+        buy_sell_data = self._get_floorsheet_by_range(symbol, start_date, end_date)
+        buy_sell_data = sorted(buy_sell_data.items(), key=lambda x: x[1][order_by], reverse=True)
+        data = [["Broker", "Buy", "Sell"]]
+        data.extend(
+            [
+                [broker, self._format_number(buy_sell["buy"]), self._format_number(buy_sell["sell"])]
+                for broker, buy_sell in buy_sell_data
+            ]
+        )
+        print(tabulate([symbol], tablefmt="grid"), end="\n")
+        print(tabulate(data, headers="firstrow", tablefmt="fancy_grid"))
 
     @_check_date_sector
     def display_sector_floorsheet(self, sector_id: int, date: Union[str, None] = None, top_n: int = 5):
@@ -347,7 +412,7 @@ class NEPSE:
         for symbol, floorsheet in sector_floorsheet.items():
             top_buy = floorsheet["top_buy"]
             top_sell = floorsheet["top_sell"]
-            self._display_data(symbol, top_buy, top_sell)
+            self._display_data(symbol, top_buy, top_sell, top_n)
 
     def display_sectors(self):
         data = [["Sector ID", "Sector Name"]]
@@ -402,7 +467,7 @@ class NEPSE:
                     self._format_number(security["highPrice"]),
                     self._format_number(security["lowPrice"]),
                     self._format_number(security["lastTradedPrice"]),
-                    self._format_number(security["totalTradeQuantity"]),
+                    self._format_number(security["previousClose"]),
                     self._format_number(security["totalTradeQuantity"]),
                     round(security["percentageChange"], 2),
                 ]
@@ -413,7 +478,7 @@ class NEPSE:
         print(tabulate(data, headers="firstrow", tablefmt="fancy_grid"))
 
     @_check_date_sector
-    def display_sector_broker_trade(self, sector_id: int, date: Union[str, None] = None, top_n: int = 5):
+    def display_sector_combined_broker_trade(self, sector_id: int, date: Union[str, None] = None, top_n: int = 5):
         sector_analysis = {"top_buy": {}, "top_sell": {}}
         sector_floorsheet = self._get_sector_floorsheet(sector_id, date, top_n=None)
         for _, floorsheet in sector_floorsheet.items():
@@ -446,20 +511,19 @@ class NEPSE:
 
         top_buy = self._get_sorted_list(sector_analysis["top_buy"], top_n=top_n)
         top_sell = self._get_sorted_list(sector_analysis["top_sell"], top_n=top_n)
-        self._display_data(self._sectors.get(sector_id), top_buy, top_sell)
+        self._display_data(self._sectors.get(sector_id), top_buy, top_sell, top_n)
 
-    def display_security_broker_trade(self, symbol: str, start_date: str, end_date: str, order_by: str = "buy"):
+    def display_sector_top_trade(self, sector_id: int, start_date: str, end_date: str, order_by: str = "buy"):
         if order_by not in ["buy", "sell"]:
             logger.info(f"Cannot order by {order_by}. It can be order by only one of {['buy', 'sell']}")
             return
-        buy_sell_data = self._get_floorsheet_by_range(symbol, start_date, end_date)
-        buy_sell_data = sorted(buy_sell_data.items(), key=lambda x: x[1][order_by], reverse=True)
-        data = [["Broker", "Buy", "sell"]]
-        data.extend(
-            [
-                [broker, self._format_number(buy_sell["buy"]), self._format_number(buy_sell["sell"])]
-                for broker, buy_sell in buy_sell_data
-            ]
-        )
-        print(tabulate([symbol], tablefmt="grid"), end="\n")
+        order_by = 2 if order_by == "buy" else 3
+        final_data = []
+        buy_sell_data = self._get_sector_floorsheet_by_range(sector_id, start_date, end_date)
+        for symbol, buy_sell in buy_sell_data.items():
+            for data in buy_sell.items():
+                final_data.append([symbol, data[0], data[1]["buy"], data[1]["sell"]])
+        final_data = sorted(final_data, key=lambda x: x[order_by], reverse=True)
+        data = [["Symbol", "Broker", "Buy", "Sell"]]
+        data.extend(final_data)
         print(tabulate(data, headers="firstrow", tablefmt="fancy_grid"))
