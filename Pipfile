@@ -10,8 +10,6 @@ isort = "*"
 [packages]
 requests = "*"
 tabulate = "*"
-undetected-chromedriver = "*"
-selenium-wire = "*"
 
 [requires]
 python_version = "3.8"

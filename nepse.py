@@ -3,54 +3,42 @@ import json
 import locale
 import os
 import pickle
-import random
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from time import sleep
 from typing import Tuple, Union
 from urllib.parse import urljoin
 
 import requests
-from requests.adapters import HTTPAdapter
 from tabulate import tabulate
 from urllib3.util.retry import Retry
 
-from utils import Payload, get_logger
+from utils import TimeoutHTTPAdapter, TokenParser, dummy_data, get_logger
 
 logger = get_logger()
 
 locale.setlocale(locale.LC_ALL, "en_IN")
 
 
-class TimeoutHTTPAdapter(HTTPAdapter):
-    DEFAULT_TIMEOUT = 10
-
-    def __init__(self, *args, **kwargs):
-        self.timeout = self.DEFAULT_TIMEOUT
-        if "timeout" in kwargs:
-            self.timeout = kwargs["timeout"]
-            del kwargs["timeout"]
-        super().__init__(*args, **kwargs)
-
-    def send(self, request, **kwargs):
-        timeout = kwargs.get("timeout")
-        if timeout is None:
-            kwargs["timeout"] = self.timeout
-        return super().send(request, **kwargs)
-
-
 class NEPSE:
-    _base_url = "https://newweb.nepalstock.com"
+    _base_url = "https://www.nepalstock.com.np"
     _data_dir = "./data"
     _securities = {}
     _sectors = {}
     _holidays = []
 
     def __init__(self, id=None) -> None:
+        self._token_parser = TokenParser()
+        self._jwt_tokens = {
+            "accessToken": "",
+            "refreshToken": "",
+        }
+        self._id = 0
         self._create_session()
+        self._fetch_jwt_tokens()
         self._get_all_securities()
         self._get_sectors()
         self._get_holidays()
-        self._id = id if id else Payload().get_id(random.choice(list(self._securities.values()))["securityId"])
+        self._fetch_id()
 
     @property
     def base_url(self):
@@ -76,8 +64,9 @@ class NEPSE:
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
             try:
-                date = kwargs.get("date") or args[1]
-            except IndexError:
+                date_string = kwargs.get("date") or args[1]
+                date = datetime.strptime(date_string, "%Y-%m-%d")
+            except (IndexError, ValueError):
                 date = None
             try:
                 symbol_or_sector = kwargs.get("symbol") or kwargs.get("sector_id") or args[0]
@@ -89,41 +78,54 @@ class NEPSE:
                     self.display_sectors()
                     return
 
-            try:
-                if not date or type(date) != str:
-                    date = datetime.today()
-                else:
-                    date = datetime.strptime(date, "%Y-%m-%d")
-            except ValueError as error:
-                logger.error(error)
+            if date and date.weekday() in [4, 5] or date > datetime.today() or date_string in self._holidays:
+                logger.info("Floorsheet is not available on Friday and Saturday and Holidays !!!")
             else:
-                if date.weekday() in [4, 5] or date > datetime.today() or date in self._holidays:
-                    logger.info("Floorsheet is not available on Friday and Saturday and Holidays !!!")
-                else:
-                    value = func(self, *args, **kwargs)
-                    if value:
-                        return value
+                value = func(self, *args, **kwargs)
+                if value:
+                    return value
 
         return wrapper
 
-    def _create_session(self) -> None:
+    def _create_session(self):
         self._session = requests.Session()
-        retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504, 401])
         adapter = TimeoutHTTPAdapter(max_retries=retries)
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
+        self._session.hooks["response"].append(self._check_response)
 
-    def _get_common_headers(self):
+    def _check_response(self, response, *args, **kwargs):
+        if response.status_code == 401:
+            self._refresh_jwt_tokens()
+            response.request.headers["authorization"] = 'Salter %s' % self._jwt_tokens["accessToken"]
+            response.history.append(response)
+            return response
+        return response
+
+    def _get_common_headers(self) -> dict:
         return {
             "authority": self._base_url.replace("https://", ""),
             "accept": "application/json, text/plain, */*",
-            "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.131 Safari/537.36",
+            "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36",
             "sec-gpc": "1",
             "sec-fetch-site": "same-origin",
             "sec-fetch-mode": "cors",
             "sec-fetch-dest": "empty",
             "accept-language": "en-US,en;q=0.9",
         }
+
+    def _fetch_id(self):
+        url = self._create_url("/api/nots/nepse-data/market-open")
+        headers = {
+            **self._get_common_headers(),
+            "referer": "%s/" % self._base_url,
+            'authorization': 'Salter %s' % self._jwt_tokens["accessToken"],
+        }
+        response, error = self._perform_request("GET", url, headers=headers, data={})
+        if not error:
+            id = response.json()["id"]
+            self._id = dummy_data(id) + id + 2 * date.today().day
 
     def _create_url(self, url) -> str:
         return urljoin(self._base_url, url)
@@ -138,12 +140,38 @@ class NEPSE:
         else:
             return response, None
 
+    def _fetch_jwt_tokens(self):
+        url = self._create_url("/api/authenticate/prove")
+
+        headers = {**self._get_common_headers(), 'referer': self._base_url}
+
+        response, error = self._perform_request("GET", url, headers=headers, data={})
+        if not error:
+            self._jwt_tokens = self._token_parser.parse(response.json())
+
+    def _refresh_jwt_tokens(self) -> None:
+        url = self._create_url("/api/authenticate/refresh-token")
+
+        payload = {"refreshToken": self._jwt_tokens["refreshToken"]}
+        headers = {
+            **self._get_common_headers(),
+            'authorization': 'Salter %s' % self._jwt_tokens["accessToken"],
+            'content-type': 'application/json',
+            'origin': self._base_url,
+            'referer': '%s/' % self._base_url,
+        }
+
+        response, error = self._perform_request("POST", url, headers=headers, data=json.dumps(payload))
+        if not error:
+            self._jwt_tokens = self._token_parser.parse(response.json())
+
     def _get_holidays(self):
         year = datetime.today().year
         url = self._create_url("/api/nots/holiday/list?year=%s" % year)
         headers = {
             **self._get_common_headers(),
             'referer': '%s/holiday-listing' % self._base_url,
+            'authorization': 'Salter %s' % self._jwt_tokens["accessToken"],
         }
 
         response, error = self._perform_request("GET", url, headers=headers, data={})
@@ -156,6 +184,7 @@ class NEPSE:
         headers = {
             **self._get_common_headers(),
             "referer": self._base_url,
+            'authorization': 'Salter %s' % self._jwt_tokens["accessToken"],
         }
 
         response, error = self._perform_request("GET", url, headers=headers, data={})
@@ -173,6 +202,7 @@ class NEPSE:
         headers = {
             **self._get_common_headers(),
             "referer": self._base_url,
+            'authorization': 'Salter %s' % self._jwt_tokens["accessToken"],
         }
 
         response, error = self._perform_request("GET", url, headers=headers, data={})
@@ -255,6 +285,7 @@ class NEPSE:
                 "content-type": "application/json",
                 "origin": self._base_url,
                 "referer": "%s/company/detail/%s" % (self._base_url, _id),
+                'authorization': 'Salter %s' % self._jwt_tokens["accessToken"],
             }
 
             response, error = self._perform_request(
@@ -308,6 +339,7 @@ class NEPSE:
         headers = {
             **self._get_common_headers(),
             "referer": self._base_url,
+            'authorization': 'Salter %s' % self._jwt_tokens["accessToken"],
         }
         response, error = self._perform_request("GET", url, headers=headers, data={})
         sector_floorsheet = {}
