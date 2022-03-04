@@ -75,7 +75,7 @@ class NEPSE:
                     return
 
             if date and date.weekday() in [4, 5] or date > datetime.today() or date_string in self._holidays:
-                logger.info("Floorsheet is not available on Friday and Saturday and Holidays !!!")
+                logger.info("Floorsheet is not available for %s" % date_string)
             else:
                 value = func(self, *args, **kwargs)
                 if value:
@@ -132,7 +132,10 @@ class NEPSE:
             response = self._session.request(*args, **kwargs)
             response.raise_for_status()
         except BaseException as error:
-            return response.text, error
+            try:
+                return response.text, error
+            except UnboundLocalError:
+                return None, error
         else:
             return response, None
 
@@ -144,6 +147,8 @@ class NEPSE:
         response, error = self._perform_request("GET", url, headers=headers, data={})
         if not error:
             self._jwt_tokens = TokenParser.parse(response.json())
+        else:
+            self._fetch_jwt_tokens()
 
     def _refresh_jwt_tokens(self) -> None:
         url = self._create_url("/api/authenticate/refresh-token")
@@ -160,6 +165,8 @@ class NEPSE:
         response, error = self._perform_request("POST", url, headers=headers, data=json.dumps(payload))
         if not error:
             self._jwt_tokens = TokenParser.parse(response.json())
+        else:
+            self._fetch_jwt_tokens()
 
     def _fetch_holidays(self) -> None:
         year = datetime.today().year
