@@ -3,7 +3,7 @@ import json
 import locale
 import os
 import pickle
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from time import sleep
 from typing import Tuple, Union
 from urllib.parse import urljoin
@@ -12,7 +12,7 @@ import requests
 from tabulate import tabulate
 from urllib3.util.retry import Retry
 
-from utils import TimeoutHTTPAdapter, TokenParser, dummy_data, get_logger
+from .utils import TimeoutHTTPAdapter, TokenParser, get_logger
 
 logger = get_logger()
 
@@ -22,26 +22,22 @@ locale.setlocale(locale.LC_ALL, "en_IN")
 class NEPSE:
     _base_url = "https://www.nepalstock.com.np"
     _data_dir = "./data"
-    _securities = {}
-    _sectors = {}
-    _holidays = []
 
-    def __init__(self, id=None) -> None:
-        self._token_parser = TokenParser()
-        self._jwt_tokens = {
-            "accessToken": "",
-            "refreshToken": "",
-        }
+    def __init__(self) -> None:
         self._id = 0
+        self._jwt_tokens = {"accessToken": "", "refreshToken": ""}
+        self._securities = {}
+        self._sectors = {}
+        self._holidays = []
         self._create_session()
         self._fetch_jwt_tokens()
-        self._get_all_securities()
-        self._get_sectors()
-        self._get_holidays()
+        self._fetch_all_securities()
+        self._fetch_sectors()
+        self._fetch_holidays()
         self._fetch_id()
 
     @property
-    def base_url(self):
+    def base_url(self) -> str:
         return self._base_url
 
     @property
@@ -49,14 +45,14 @@ class NEPSE:
         return self._securities
 
     @property
-    def sectors(self):
+    def sectors(self) -> dict:
         return self._sectors
 
-    def _pickle_data(self, name: str, data: dict):
+    def _pickle_data(self, name: str, data: dict) -> None:
         with open(os.path.join(self._data_dir, name), "wb") as f:
             pickle.dump(data, f)
 
-    def _unpickle_data(self, name: str):
+    def _unpickle_data(self, name: str) -> Union[dict, None]:
         with open(os.path.join(self._data_dir, name), "rb") as f:
             return pickle.load(f)
 
@@ -87,15 +83,15 @@ class NEPSE:
 
         return wrapper
 
-    def _create_session(self):
+    def _create_session(self) -> None:
         self._session = requests.Session()
-        retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504, 401])
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=[401, 413, 429, 502, 503, 504])
         adapter = TimeoutHTTPAdapter(max_retries=retries)
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
         self._session.hooks["response"].append(self._check_response)
 
-    def _check_response(self, response, *args, **kwargs):
+    def _check_response(self, response, *args, **kwargs) -> requests.Response:
         if response.status_code == 401:
             self._refresh_jwt_tokens()
             response.request.headers["authorization"] = 'Salter %s' % self._jwt_tokens["accessToken"]
@@ -115,7 +111,7 @@ class NEPSE:
             "accept-language": "en-US,en;q=0.9",
         }
 
-    def _fetch_id(self):
+    def _fetch_id(self) -> None:
         url = self._create_url("/api/nots/nepse-data/market-open")
         headers = {
             **self._get_common_headers(),
@@ -125,7 +121,7 @@ class NEPSE:
         response, error = self._perform_request("GET", url, headers=headers, data={})
         if not error:
             id = response.json()["id"]
-            self._id = dummy_data(id) + id + 2 * date.today().day
+            self._id = TokenParser.get_post_id(id)
 
     def _create_url(self, url) -> str:
         return urljoin(self._base_url, url)
@@ -136,18 +132,18 @@ class NEPSE:
             response = self._session.request(*args, **kwargs)
             response.raise_for_status()
         except BaseException as error:
-            return None, error
+            return response.text, error
         else:
             return response, None
 
-    def _fetch_jwt_tokens(self):
+    def _fetch_jwt_tokens(self) -> None:
         url = self._create_url("/api/authenticate/prove")
 
         headers = {**self._get_common_headers(), 'referer': self._base_url}
 
         response, error = self._perform_request("GET", url, headers=headers, data={})
         if not error:
-            self._jwt_tokens = self._token_parser.parse(response.json())
+            self._jwt_tokens = TokenParser.parse(response.json())
 
     def _refresh_jwt_tokens(self) -> None:
         url = self._create_url("/api/authenticate/refresh-token")
@@ -163,9 +159,9 @@ class NEPSE:
 
         response, error = self._perform_request("POST", url, headers=headers, data=json.dumps(payload))
         if not error:
-            self._jwt_tokens = self._token_parser.parse(response.json())
+            self._jwt_tokens = TokenParser.parse(response.json())
 
-    def _get_holidays(self):
+    def _fetch_holidays(self) -> None:
         year = datetime.today().year
         url = self._create_url("/api/nots/holiday/list?year=%s" % year)
         headers = {
@@ -178,7 +174,7 @@ class NEPSE:
         if not error:
             self._holidays = [holiday['holidayDate'] for holiday in response.json()]
 
-    def _get_all_securities(self):
+    def _fetch_all_securities(self) -> None:
         url = self._create_url("/api/nots/securityDailyTradeStat/58")
 
         headers = {
@@ -193,7 +189,7 @@ class NEPSE:
         else:
             logger.error(error)
 
-    def _get_sectors(self):
+    def _fetch_sectors(self) -> None:
         if os.path.exists(os.path.join(self._data_dir, "sectors.pkl")):
             self._sectors = self._unpickle_data("sectors.pkl")
             return
@@ -218,7 +214,7 @@ class NEPSE:
         sorted_data = sorted(data.items(), key=lambda x: x[1]["quantity"], reverse=True)
         return sorted_data[:top_n] if top_n else sorted_data
 
-    def _display_data(self, symbol: str, top_buy: list, top_sell: list, top_n: int):
+    def _display_data(self, symbol: str, top_buy: list, top_sell: list, top_n: int) -> None:
         data = [
             [
                 "Top Buyer",
@@ -245,7 +241,7 @@ class NEPSE:
                         sell_item[1]["percent"],
                     ]
                 )
-            except IndexError:
+            except (IndexError, KeyError):
                 pass
         print(tabulate([symbol], tablefmt="grid"), end="\n")
         print(
@@ -291,6 +287,9 @@ class NEPSE:
             response, error = self._perform_request(
                 "POST", url, headers=headers, params=params, data=json.dumps(payload)
             )
+            if type(response) == str and response == "Searched Date is not valid.":
+                last_page = True
+                logger.error(response)
             if not error:
                 response_json = response.json()
                 total_quantity = response_json["totalQty"]

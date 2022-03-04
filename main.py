@@ -1,4 +1,4 @@
-from nepse import NEPSE
+from nepse_analysis import NEPSE
 
 if __name__ == "__main__":
     nepse = NEPSE()
