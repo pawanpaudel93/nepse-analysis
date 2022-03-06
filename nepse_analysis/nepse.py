@@ -85,7 +85,7 @@ class NEPSE:
 
     def _create_session(self) -> None:
         self._session = requests.Session()
-        retries = Retry(total=3, backoff_factor=1, status_forcelist=[401, 413, 429, 502, 503, 504])
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=[413, 429, 502, 503, 504])
         adapter = TimeoutHTTPAdapter(max_retries=retries)
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
@@ -96,7 +96,7 @@ class NEPSE:
             self._refresh_jwt_tokens()
             response.request.headers["authorization"] = 'Salter %s' % self._jwt_tokens["accessToken"]
             response.history.append(response)
-            return response
+            return response.connection.send(response.request, *args, **kwargs)
         return response
 
     def _get_common_headers(self) -> dict:
